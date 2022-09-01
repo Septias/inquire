@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, fmt::Display, io::Result};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fmt::Display,
+    io::Result,
+};
 
 use unicode_width::UnicodeWidthChar;
 
@@ -51,7 +55,7 @@ pub trait DateSelectBackend: CommonBackend {
     fn render_date_select_options<D: Display>(
         &mut self,
         page: Page<ListOption<D>>,
-        range: &Option<(usize, usize)>,
+        range: &HashSet<usize>,
     ) -> Result<()>;
     fn render_fold_message<K: Display>(&mut self, fold_message: &K) -> Result<()>;
 }
@@ -502,7 +506,7 @@ where
     fn render_date_select_options<D: Display>(
         &mut self,
         page: Page<ListOption<D>>,
-        range: &Option<(usize, usize)>,
+        selected: &HashSet<usize>,
     ) -> Result<()> {
         for (idx, option) in page.content.iter().enumerate() {
             self.print_option_prefix(idx, &page)?;
@@ -514,12 +518,11 @@ where
                 self.terminal.write(" ")?;
             }
 
-            match range {
-                Some((start, end)) if *start <= option.index && option.index <= *end => self
-                    .terminal
-                    .write_styled(&Styled::new(option).with_bg(Color::Grey))?,
-                Some(_) => self.print_option_value(option)?,
-                None => self.print_option_value(option)?,
+            if selected.contains(&option.index) {
+                self.terminal
+                    .write_styled(&Styled::new(option).with_bg(Color::Grey))?
+            } else {
+                self.print_option_value(option)?
             }
 
             self.new_line()?;
@@ -530,6 +533,7 @@ where
 
     fn render_fold_message<K: Display>(&mut self, folder_message: &K) -> Result<()> {
         self.terminal.write(folder_message)?;
+        self.new_line()?;
         Ok(())
     }
 }

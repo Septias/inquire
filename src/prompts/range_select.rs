@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{collections::HashSet, fmt::Display, hash};
 
 use crate::{
     config::{self, get_configuration},
@@ -94,7 +94,7 @@ pub struct RangeSelect<'a, T, K: Display> {
     /// Function called to transform your selection to an arbitrary type
     /// Example:
     /// sum up all selected durations
-    pub folder: Option<Folder<'a, T, K>>,
+    pub folder: Folder<'a, T, K>,
 }
 
 impl<'a, T, K: Display> RangeSelect<'a, T, K>
@@ -158,7 +158,7 @@ where
         Some("↑↓ to move, enter to select, type to filter");
 
     /// Creates a [Select] with the provided message and options, along with default configuration values.
-    pub fn new(message: &'a str, options: Vec<T>, folder: Option<Folder<'a, T, K>>) -> Self {
+    pub fn new(message: &'a str, options: Vec<T>, folder: Folder<'a, T, K>) -> Self {
         Self {
             message,
             options,
@@ -272,15 +272,8 @@ where
     }
 }
 
-#[derive(PartialEq)]
-enum SelectMode {
-    SelectStart,
-    SelectEnd,
-    Move,
-}
-
 /// Fold an array of selected options into a new value
-pub type Folder<'a, T, K> = &'a dyn Fn(&[T]) -> K;
+pub type Folder<'a, T, K> = &'a dyn Fn(&[&T]) -> K;
 
 struct RangeSelectPrompt<'a, T, K: Display> {
     message: &'a str,
@@ -294,10 +287,8 @@ struct RangeSelectPrompt<'a, T, K: Display> {
     input: Input,
     filter: Filter<'a, T>,
     _formatter: OptionFormatter<'a, T>,
-    start: Option<usize>,
-    end: Option<usize>,
-    mode: SelectMode,
-    folder: Option<Folder<'a, T, K>>,
+    selected: HashSet<usize>,
+    folder: Folder<'a, T, K>,
 }
 
 impl<'a, T, K: Display> RangeSelectPrompt<'a, T, K>
@@ -334,9 +325,7 @@ where
             input: Input::new(),
             filter: so.filter,
             _formatter: so.formatter,
-            start: None,
-            end: None,
-            mode: SelectMode::Move,
+            selected: HashSet::new(),
             folder: so.folder,
         })
     }
@@ -345,18 +334,6 @@ where
         self.options
             .iter()
             .enumerate()
-            // filter all options out that are not allowed because start >= end
-            .filter(|(option_index, _)| match self.mode {
-                SelectMode::SelectStart => self
-                    .end
-                    .and_then(|max_index| Some(*option_index <= max_index))
-                    .unwrap(),
-                SelectMode::SelectEnd => self
-                    .start
-                    .and_then(|min_index| Some(*option_index >= min_index))
-                    .unwrap(),
-                SelectMode::Move => true,
-            })
             .filter_map(|(i, opt)| match self.input.content() {
                 val if val.is_empty() => Some(i),
                 val if (self.filter)(val, opt, self.string_options.get(i).unwrap(), i) => Some(i),
@@ -366,7 +343,7 @@ where
     }
 
     fn move_cursor_up(&mut self, qty: usize, wrap: bool) {
-        if wrap && self.mode == SelectMode::Move {
+        if wrap {
             let after_wrap = qty.saturating_sub(self.cursor_index);
             self.cursor_index = self
                 .cursor_index
@@ -383,7 +360,7 @@ where
         if self.cursor_index >= self.filtered_options.len() {
             self.cursor_index = if self.filtered_options.is_empty() {
                 0
-            } else if wrap && self.mode == SelectMode::Move {
+            } else if wrap {
                 self.cursor_index % self.filtered_options.len()
             } else {
                 self.filtered_options.len().saturating_sub(1)
@@ -399,79 +376,35 @@ where
         self.filtered_options = options;
     }
 
-    /// returns the position the cursor-index has in the unfiltered options
-    fn translated_ci(&self) -> usize {
-        if self.filtered_options.len() > 0 {
-            self.filtered_options[self.cursor_index]
+    fn toogle_set<F: hash::Hash + Eq>(set: &mut HashSet<F>, value: F) {
+        if set.contains(&value) {
+            set.remove(&value);
         } else {
-            0
+            set.insert(value);
         }
     }
 
     fn on_change(&mut self, key: Key) {
         match key {
+            Key::Up(KeyModifiers::SHIFT) => {
+                Self::toogle_set(&mut self.selected, self.cursor_index);
+                self.move_cursor_up(1, true)
+            }
             Key::Up(KeyModifiers::NONE) => self.move_cursor_up(1, true),
             Key::Char('k', KeyModifiers::NONE) if self.vim_mode => self.move_cursor_up(1, true),
             Key::PageUp => self.move_cursor_up(self.page_size, false),
             Key::Home => self.move_cursor_up(usize::MAX, false),
 
             Key::Down(KeyModifiers::NONE) => self.move_cursor_down(1, true),
+            Key::Down(KeyModifiers::SHIFT) => {
+                Self::toogle_set(&mut self.selected, self.cursor_index);
+
+                self.move_cursor_down(1, true)
+            }
+
             Key::Char('j', KeyModifiers::NONE) if self.vim_mode => self.move_cursor_down(1, true),
             Key::PageDown => self.move_cursor_down(self.page_size, false),
             Key::End => self.move_cursor_down(usize::MAX, false),
-            Key::Char('s', KeyModifiers::CONTROL) => {
-                if let Some(end_index) = self.end {
-                    if self.cursor_index > end_index {
-                        self.end = None;
-                    }
-                }
-
-                self.start = Some(self.translated_ci());
-
-                if self.end.is_none() {
-                    self.mode = SelectMode::SelectEnd;
-                    self.help_message = Some("Select an end position");
-                } else {
-                    // if the selection is done reset to moving mode
-                    self.mode = SelectMode::Move;
-                    self.help_message = None
-                }
-
-                self.update_filtered_options();
-
-                if self.mode == SelectMode::SelectEnd {
-                    self.cursor_index = 0;
-                } else {
-                    // TODO: jump to the range' start-position in the 
-                    // newly sorted options array
-                }
-                
-            }
-            Key::Char('e', KeyModifiers::CONTROL) => {
-                if let Some(start_index) = self.start {
-                    if self.cursor_index < start_index {
-                        self.start = None;
-                    }
-                }
-
-                self.end = Some(self.translated_ci());
-
-                if self.start.is_none() {
-                    self.mode = SelectMode::SelectStart;
-                    self.help_message = Some("Select a start position");
-                } else {
-                    self.mode = SelectMode::Move;
-                    self.help_message = None;
-                }
-                self.update_filtered_options();
-                
-                if self.mode == SelectMode::SelectStart {
-                    self.cursor_index = self.options.len() - 1; 
-                } else {
-                    // TODO: jump to the range' start-position in the 
-                    // newly sorted options array
-                }
-            }
             key => {
                 let dirty = self.input.handle_key(key);
 
@@ -483,11 +416,20 @@ where
     }
 
     fn has_answer_highlighted(&mut self) -> bool {
-        self.start.is_some() && self.end.is_some()
+        self.selected.len() > 0
     }
 
-    fn get_final_answer(&mut self) -> K {
-        self.folder.unwrap()(&self.options[self.start.unwrap()..self.end.unwrap()])
+    fn apply_fold(&self) -> K {
+        let t: Vec<&T> = self.selected.iter().map(|a| &self.options[*a]).collect();
+        (self.folder)(&t)
+    }
+
+    fn get_final_answer(&self) -> K {
+        self.apply_fold()
+    }
+
+    fn translated_selected(&self) -> Vec<&T> {
+        self.selected.iter().map(|a| &self.options[*a]).collect()
     }
 
     fn render<B: DateSelectBackend>(&mut self, backend: &mut B) -> InquireResult<()> {
@@ -506,35 +448,17 @@ where
 
         let page = paginate(self.page_size, &choices, self.cursor_index);
 
-        let selected_range = self.get_selected_range();
-        backend.render_date_select_options(page, &selected_range)?;
+        backend.render_date_select_options(page, &self.selected)?;
 
         if let Some(help_message) = self.help_message {
             backend.render_help_message(help_message)?;
         }
 
-        if let Some(folder) = self.folder && let Some((start, end)) = selected_range {
-            backend.render_fold_message(&folder(&self.options[start..end]))?;
-        }
+        backend.render_fold_message(&(self.folder)(&self.translated_selected()))?;
 
         backend.frame_finish()?;
 
         Ok(())
-    }
-
-    fn get_selected_range(&self) -> Option<(usize, usize)> {
-        if self.filtered_options.len() == 0 {
-            return Some((0, 0));
-        }
-
-        match self.mode {
-            SelectMode::SelectStart => Some((self.translated_ci(), self.end.unwrap())),
-            SelectMode::SelectEnd => Some((self.start.unwrap(), self.translated_ci())),
-            SelectMode::Move if self.start.is_some() => {
-                Some((self.start.unwrap(), self.end.unwrap()))
-            }
-            SelectMode::Move => None,
-        }
     }
 
     fn prompt<B: DateSelectBackend>(mut self, backend: &mut B) -> InquireResult<K> {
@@ -546,9 +470,8 @@ where
             match key {
                 Key::Interrupt => interrupt_prompt!(),
                 Key::Cancel => {
-                    if self.mode != SelectMode::Move {
-                        self.mode = SelectMode::Move;
-                        (self.start, self.end) = (None, None);
+                    if self.selected.len() > 0 {
+                        self.selected = HashSet::new();
                         self.update_filtered_options();
                     } else {
                         cancel_prompt!(backend, self.message);

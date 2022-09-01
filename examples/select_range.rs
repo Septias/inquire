@@ -36,12 +36,12 @@ fn main() {
         Expenses::new("2022-04-01", 5),
     ];
 
-    let folder: Folder<_, String> = &|elements: &[Expenses]| {
+    let folder: Folder<_, String> = &|elements: &[&Expenses]| {
         let costs: usize = elements.iter().map(|expenses| expenses.total).sum();
         format!("Total costs: {:?} gold", costs)
     };
 
-    let ans = RangeSelect::new("Select effected days", options, Some(folder)).prompt_skippable();
+    let ans = RangeSelect::new("Select effected days", options, folder).prompt_skippable();
     match ans {
         Ok(choice) => println!("your total is: {:?}", choice),
         Err(_) => println!("There was an error, please try again"),
